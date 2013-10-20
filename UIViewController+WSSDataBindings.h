@@ -1,7 +1,7 @@
 /*
  *  UIViewController+WSSDataBindings.h
  *
- * Created by Joshua Caswell on 10/17/13.
+ * Created by Joshua Caswell on 10/18/13.
  * This code is in the public domain. I retain no copyright, and it is offered
  * without restriction _or warranty_. You are free to use the code in whatever
  * way you like. If you would like to mention that I created the code, it will
@@ -14,23 +14,19 @@
 @interface UIViewController (WSSDataBindings)
 
 /*
- * Establish a binding between the key path given by `binding` and the key path
- * `path` on `target`. This uses KVO to update the bound property, and also
- * immediately sets the value via KVC.
+ * Bind the named property (which can be any valid key _path_) on the
+ * controller to the path on the target. The property will be updated via
+ * KVO whenever the targeted value changes.
  */
-- (void)WSSBind:(NSString *)binding
+
+- (void)WSSBind:(NSString *)bindingName
        toObject:(id)target
     withKeyPath:(NSString *)path;
 
-
-/* This needs to be called from each view controller's implementation
- * of observeValueForKeyPath:ofObject:change:context: in order for the
- * the bindings to work. This is to avoid overriding that method in a 
- * category, which is unlikely to cause a problem in this case, but generally
- * is a very bad idea.
+/*
+ * Remove the named binding. Since a property cannot be bound to more than one
+ * target at a time, only the name is required.
  */
-- (void)WSSEvaluateBindingForKeyPath:(NSString *)path
-                            ofObject:(id)target
-                          usingValue:(id)value;
+- (void)WSSUnbind:(NSString *)bindingName;
 
 @end

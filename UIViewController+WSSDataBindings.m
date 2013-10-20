@@ -1,7 +1,7 @@
 /* 
  * UIViewController+WSSDataBindings.m
  *
- * Created by Joshua Caswell on 10/17/13.
+ * Created by Joshua Caswell on 10/18/13.
  * This code is in the public domain. I retain no copyright, and it is offered
  * without restriction _or warranty_. You are free to use the code in whatever
  * way you like. If you would like to mention that I created the code, it will
@@ -12,119 +12,145 @@
 #import "UIViewController+WSSDataBindings.h"
 #import <objc/runtime.h>
 
+@interface UIViewController (WSSDataBindingAddendum)
 
-/*
- * WSSBindingKey wraps up the bound-to object and key path so that they can
- * be used in combination as a key for the bindings dictionary.
+/* 
+ * Ensure the controller will be able to access the binding object (for
+ * unbinding) by using the controller and the binding name as the key to tie
+ * the binding to the controller with objc_setAssociatedObject().
  */
-@interface WSSBindingKey : NSObject <NSCopying>
-
-+ (instancetype)bindingKeyWithKeyPath:(NSString *)path ofObject:(id)target;
+- (NSUInteger)WSSAssociateKeyForBinding:(NSString *)bindingName;
 
 @end
 
-@implementation WSSBindingKey
+@implementation UIViewController (WSSDataBindingAddendum)
+
+- (NSUInteger)WSSAssociateKeyForBinding:(NSString *)bindingName
 {
-    NSValue * targetVal;
-    NSString * keyPath;
+    return ((NSUInteger)self ^ [bindingName hash]);
 }
 
-+ (instancetype)bindingKeyWithKeyPath:(NSString *)path ofObject:(id)target
+@end
+
+#pragma mark -
+
+/*
+ * A binding object establishes itself as a KVObserver on the binding target
+ * and uses KVC to update the bound property whenever necessary.
+ * Its lifetime is tied to the target's, so that it will not linger as a
+ * registered observer. It can also be destroyed via the bound object, using
+ * -[UIViewController(WSSDataBindings) WSSUnbind:]
+ */
+
+@interface WSSBinding : NSObject
+
++ (instancetype)bindingWithBoundName:(NSString *)name onObject:(id)bound
+                           toKeyPath:(NSString *)path ofObject:(id)target;
+
+- (void)unbind;
+
+@end
+
+@implementation WSSBinding
 {
-    return [[self alloc] initWithKeyPath:path ofObject:target];
+    // When the binding is destroyed because its boundToTarget (which owns it
+    // for memory management purposes) is being deallocated, a __weak ref
+    // causes the target to warn that it still has registered observers. It's
+    // not clear why that is; it's plausible that the ref is getting zeroed
+    // too early, but it seems to still be valid in -[WSSBinding dealloc].
+    // __unsafe_unretained works, but this does imply possible fragility here.
+    // The boundObj is __weak, however, so that if it disappears somehow,
+    // setValue:forKeyPath: will not raise an exception.
+    NSString * bindingName;
+    __weak id boundObj;
+    NSString * boundToPath;
+    __unsafe_unretained id boundToTarget;
 }
 
-- (id)initWithKeyPath:(NSString *)path ofObject:(id)target
++ (instancetype)bindingWithBoundName:(NSString *)name onObject:(id)bound
+                           toKeyPath:(NSString *)path ofObject:(id)target
+{
+    return [[self alloc] initWithBoundName:name onObject:bound
+                               toKeyPath:path ofObject:target];
+}
+
+- (id)initWithBoundName:(NSString *)name onObject:(id)bound
+              toKeyPath:(NSString *)path ofObject:(id)target
 {
     self = [super init];
     if( !self ) return nil;
     
-    // Take a pointer to the target to avoid it having to conform to NSCopying
-    targetVal = [NSValue valueWithNonretainedObject:target];
-    keyPath = [path copy];
+    bindingName = [name copy];
+    boundObj = bound;
+    boundToPath = [path copy];
+    boundToTarget = target;
+    
+    [boundToTarget addObserver:self
+                    forKeyPath:boundToPath
+                       // Set the value immediately and also get updates
+                       options:NSKeyValueObservingOptionNew|NSKeyValueObservingOptionInitial
+                       context:NULL];
     
     return self;
 }
 
-- (NSUInteger)hash
+- (void)observeValueForKeyPath:(NSString *)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary *)change
+                       context:(void *)context
 {
-    static NSUInteger halfNSUIntegerBits = CHAR_BIT * sizeof(NSUInteger) / 2;
-    NSUInteger targetHash = [targetVal hash];
-    targetHash = (targetHash << halfNSUIntegerBits) |
-                 (targetHash >> halfNSUIntegerBits);
-    return targetHash ^ [keyPath hash];
+    [boundObj setValue:[boundToTarget valueForKeyPath:boundToPath]
+                forKeyPath:bindingName];
 }
 
-- (BOOL)isEqual:(id)other
+- (void)dealloc
 {
-    if( self == other ) return YES;
-    
-    if( ![other isKindOfClass:[self class]] ) return NO;
-    
-    WSSBindingKey * otherKey = other;
-    
-    return [targetVal isEqual:otherKey->targetVal] &&
-           [keyPath isEqual:otherKey->keyPath];
+    [boundToTarget removeObserver:self forKeyPath:boundToPath];
 }
 
-- (id)copyWithZone:(NSZone *)zone
+- (void)unbind
 {
-    return [WSSBindingKey bindingKeyWithKeyPath:keyPath
-                                       ofObject:[targetVal nonretainedObjectValue]];
+    // Dissociate self; this will lead to deallocation, where deregistration
+    // for observation takes place.
+    NSUInteger key = [boundObj WSSAssociateKeyForBinding:bindingName];
+    objc_setAssociatedObject(boundToTarget, (void *)key, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
-
 @end
 
-typedef void (^BindingBlock)(id);
+#pragma mark - UIViewController+WSSDataBindings
 
 @implementation UIViewController (WSSDataBindings)
 
-- (void)WSSBind:(NSString *)bindingPath
+- (void)WSSBind:(NSString *)bindingName
        toObject:(id)target
     withKeyPath:(NSString *)path
 {
-    [target addObserver:self
-             forKeyPath:path
-                options:NSKeyValueObservingOptionNew
-                context:NULL];
+    WSSBinding * binding = [WSSBinding bindingWithBoundName:bindingName
+                                                   onObject:self
+                                                  toKeyPath:path
+                                                   ofObject:target];
     
-    __weak id weakSelf = self;
-    BindingBlock binding = ^(id val){
-        [weakSelf setValue:val forKeyPath:bindingPath];
-    };
-    WSSBindingKey * key = [WSSBindingKey bindingKeyWithKeyPath:path
-                                                      ofObject:target];
-    [[self WSSBindingsDict] setObject:binding forKey:key];
-
-    // Get the initial value
-    [self setValue:[target valueForKeyPath:path] forKeyPath:bindingPath];
+    // Attach the binding to both target and controller, but only make it
+    // owned by the target. This provides automatic deregistration when the
+    // target is destroyed, and allows the controller to unbind at will.
+    // Disregard the target and bound path for the key to allow mirroring
+    // Cocoa's unbind: method; this is simplest for the controller.
+    NSUInteger key = [self WSSAssociateKeyForBinding:bindingName];
+    objc_setAssociatedObject(target, (void *)key, binding,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(self, (void *)key, binding,
+                             OBJC_ASSOCIATION_ASSIGN);
 }
 
-static char bindings_dict_key;
-- (NSMutableDictionary *)WSSBindingsDict
+- (void)WSSUnbind:(NSString *)bindingName
 {
-    NSMutableDictionary * bindingsDict;
-    bindingsDict = objc_getAssociatedObject(self, &bindings_dict_key);
-    if( !bindingsDict ){
-        bindingsDict = [NSMutableDictionary dictionary];
-        objc_setAssociatedObject(self, &bindings_dict_key,
-                                 bindingsDict,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    
-    return bindingsDict;
-}
-
-- (void)WSSEvaluateBindingForKeyPath:(NSString *)path
-                            ofObject:(id)target
-                          usingValue:(id)value
-{
-    WSSBindingKey * key = [WSSBindingKey bindingKeyWithKeyPath:path
-                                                      ofObject:target];
-    BindingBlock binding = [[self WSSBindingsDict] objectForKey:key];
-    if( binding ){
-        binding(value);
-    }
+    WSSBinding * binding;
+    NSUInteger key = [self WSSAssociateKeyForBinding:bindingName];
+    binding = objc_getAssociatedObject(self, (void *)key);
+    [binding unbind];
+    objc_setAssociatedObject(self, (void *)key, nil,
+                             OBJC_ASSOCIATION_ASSIGN);
 }
 
 @end
